@@ -1,131 +1,153 @@
+import yfinance as yf
+import datetime as dt
 import pandas as pd
-
+import pandas_ta as ta
 
 class DataManager:
-    def __init__(self, data_path: str, name):
-        self.name = name
-        self.data = None
-        self.path = f"./data/{self.name}.parquet"
-        if data_path:
-            self.load_data(data_path)
+    def __init__(self, ticker, indicators, interval="1m", period="max", data_window=30, start_date=None, end_date=None):
+        self.ticker = ticker
+        self.indicators = indicators
+        self.interval = interval
+        self.period = period
+        self.data_window = data_window
 
+        self.now = dt.datetime.now()
+        self.filename = f"{ticker}_{period}_{interval}.csv"
+        self.total_data = self.open_data()
+        self.update_indicators()
 
+        if start_date and end_date:
+            self.total_data.set_index('Date', inplace=True)
+            self.total_backtest_data = self.total_data.loc[start_date:end_date].copy()
+            self.total_data = self.total_data.reset_index()
+        else:
+            self.total_backtest_data=self.total_data
+        self.current_index = self.data_window
+        # Inicializamos self.data con el primer bloque de datos
+        self.data = self.total_backtest_data.iloc[:self.current_index].copy()
 
-    def load_data(self, file_path: str):
-        """Loads data from CSV (or other formats) into a pandas DataFrame."""
-        try:
-            # Load with timestamp parsing
-            self.data = pd.read_csv(file_path)
-            
-            # Standardize column names (example mapping, expand as needed)
-            # Assuming input has specific names, or we map them dynamically
-            # For now, let's assume standard names or simple lowercase matching
-            self.data.columns = [c.capitalize() for c in self.data.columns]
-            
-            if 'Timestamp' in self.data.columns:
-                 self.data['Timestamp'] = pd.to_datetime(self.data['Timestamp'], unit='s')
-                 self.data.set_index('Timestamp', inplace=True)
-            elif 'Date' in self.data.columns:
-                 self.data['Date'] = pd.to_datetime(self.data['Date'])
-                 self.data.set_index('Date', inplace=True)
-
-            # Ensure required columns exist
-            required = ['Open', 'High', 'Low', 'Close', 'Volume']
-            if not all(col in self.data.columns for col in required):
-                print(f"Warning: Missing one of {required} columns.")
-
-            # Data Cleaning
-            self.data.sort_index(inplace=True)
-            self.data = self.data[~self.data.index.duplicated(keep='first')]
-            self.data.fillna(method='ffill', inplace=True)
-            
-            print(f"Data loaded successfully from {file_path}")
-        except FileNotFoundError:
-            print(f"Error: File not found at {file_path}")
-        except Exception as e:
-            print(f"Error loading data: {e}")
         
-        return self.data
-    
 
-
-    def save_data(self):
-        """Saves data to parquet."""
-        try:
-            self.data.to_parquet(self.path) # Index is preserved by default in Parquet
-            print(f"Data saved successfully to {self.path}")
-        except Exception as e:
-            print(f"Error saving data: {e}")
-        
-        return self
-
-
-    def get_data(self):
-        if self.data is not None:
-            return self.data
-            
-        try:
-            self.data = pd.read_parquet(self.path)
-            return self.data
-        except FileNotFoundError:
-             print(f"No existing data found at {self.path}")
-             return None
-    
-
-    def add_indicators(self, indicators: list = None):
+    def open_data(self):
         """
-        Adds technical indicators to the DataFrame.
-
-        Args:
-            indicators (list): List of dicts specifying indicators to add.
-                               Example: [
-                                   {'kind': 'sma', 'length': 20, 'col': 'Close'},
-                                   {'kind': 'rsi', 'length': 14, 'col': 'Close'}
-                               ]
+        This function will try to open the data of the ticker.
         """
-        if self.data is None:
-            self.get_data()
+        try:
+            data = pd.read_csv(f"src/data/{self.filename}")
+            #print("opened")
+        except:
+            #print("downloaded")
+            data = self.download_data()
+            
+        data.set_index('Date', inplace=True)
+        data.sort_index()
+        data = data.reset_index()
 
-        if indicators is None:
-            return self
-
-        for ind in indicators:
-            kind = ind.get('kind', '').lower()
-            col = ind.get('col', 'Close')
-            length = ind.get('length', 14)
-            name = ind.get('name', f"{kind}_{length}")
-
-            if kind == 'sma':
-                self.data[name] = self.data[col].rolling(window=length).mean()
-
-            elif kind == 'ema':
-                self.data[name] = self.data[col].ewm(span=length, adjust=False).mean()
-
-            elif kind == 'rsi':
-                delta = self.data[col].diff()
-                gain = (delta.where(delta > 0, 0)).ewm(alpha=1/length, adjust=False).mean()
-                loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/length, adjust=False).mean()
-                rs = gain / loss
-                self.data[name] = 100 - (100 / (1 + rs))
-
-            elif kind == 'bb':
-                std_dev = ind.get('std_dev', 2)
-                self.data[f'{name}_mid'] = self.data[col].rolling(window=length).mean()
-                std = self.data[col].rolling(window=length).std()
-                self.data[f'{name}_upper'] = self.data[f'{name}_mid'] + (std_dev * std)
-                self.data[f'{name}_lower'] = self.data[f'{name}_mid'] - (std_dev * std)
-
-            elif kind == 'atr':
-                high = ind.get('high', 'High')
-                low = ind.get('low', 'Low')
-                close = ind.get('close', 'Close')
-                tr1 = self.data[high] - self.data[low]
-                tr2 = abs(self.data[high] - self.data[close].shift())
-                tr3 = abs(self.data[low] - self.data[close].shift())
-                tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-                self.data[name] = tr.ewm(alpha=1/length, adjust=False).mean()
-
-            else:
-                print(f"Warning: Indicator '{kind}' not recognized.")
+        return data
         
-        return self
+
+    def download_data(self):
+        """
+        This function will download and save the data taking into account this:
+        1m	                   ->   7 days
+        2m, 5m, 15m, 30m, 90m  ->   60 days
+        1h	                   ->   2 years
+        1d, 1wk, 1mo           ->   MAX
+        """
+        ticker = self.ticker
+        period = self.period
+        interval = self.interval
+
+        data = yf.download(ticker, period=period, interval=interval, progress=False)
+
+        if interval == "1m":
+            period = "7D"
+        elif interval in ["2m", "5m", "15m", "30m", "90m"]:
+            period = "60D"
+        elif interval == "1h":
+            period = "2y"
+        else: period = "max"
+
+        if not data.empty:
+            self.filename = f"{ticker}_{period}_{interval}.csv"
+
+            data.columns = data.columns.get_level_values(0)
+            data = data.reset_index()
+
+            data.to_csv(f'src/data/{self.filename}', index=False)
+
+        return data
+
+    def fetch_data(self, ticker, interval, period):
+        data = yf.download(ticker, interval=interval, period=period, progress=False)
+        # Only one entry not two
+        if isinstance(data.columns, pd.MultiIndex):
+            data.columns = data.columns.droplevel(1)
+        return pd.DataFrame(data)
+
+    def update_data(self):
+        """Will update the data and remove old data rows to maintain a fixed window size."""
+        #print(self.current_index)
+        #print(len(self.total_backtest_data))
+        if self.current_index < len(self.total_backtest_data):
+            # 1. Obtener la siguiente fila
+            next_row = self.total_backtest_data.iloc[[self.current_index]]
+            
+            # 2. Concatenar a self.data
+            self.data = pd.concat([self.data, next_row], ignore_index=True)
+            
+            # 3. Mantener el tamaño de la ventana (data_window)
+            if len(self.data) > self.data_window:
+                self.data = self.data.iloc[-self.data_window:].copy()
+            
+            # 4. Incrementar puntero para la próxima llamada
+            self.current_index += 1
+            
+            # print(f"Dato actualizado. Nueva fecha: {self.data.iloc[-1]['Date']}")
+            return False
+        else:
+            return True
+        
+    
+    def update_indicators(self):
+        """Add technical indicators to the data."""
+        if self.indicators is None: return
+
+        for name, values in self.indicators.items():
+            for value in values:
+                if name == "EMA":               
+                    self.total_data[f"EMA_{value}"] = ta.ema(self.total_data["Close"], length=value)
+                elif name == "RSI":
+                    self.total_data[f"RSI_{value}"] = ta.rsi(self.total_data["Close"], length=value)
+                elif name == "SMA":
+                    self.total_data[f"SMA_{value}"] = ta.sma(self.total_data["Close"], length=value)
+                elif name == "WMA":
+                    self.total_data[f"WMA_{value}"] = ta.wma(self.total_data["Close"], length=value)
+                elif name == "BBands":
+                    bbands = ta.bbands(self.total_data["Close"], length=value[0], std=value[1])
+                    self.total_data[f'BBands_{value}'] = bbands
+                elif name == "EMA_CROSS":
+                    self.total_data[f"EMA_CROSS_{value}"] = ta.cross(self.data[f"EMA_{value[0]}"], self.total_data[f"EMA_{value[1]}"],above=True, equal=False)
+'''
+indicators = {
+    "EMA": [10, 20],
+    "RSI": [14],
+    "SMA": [50],
+    "WMA": [30],
+    "BBands": [(20, 2)]
+}
+dm = DataManager("AAPL", indicators, "1m", "1D")
+
+print(dm.data.columns)
+print(dm.data.tail())
+
+'''
+'''
+indicators = {
+    "EMA": [10, 20],
+}
+
+dm = DataManager('AAPL', indicators, "1D", "max",30,"2020-01-01","2024-01-01")
+#print(dm.data.tail())
+
+'''
